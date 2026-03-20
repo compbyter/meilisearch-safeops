@@ -135,6 +135,28 @@ async function waitTask(taskUid) {
   throw new Error(`Task timeout: ${taskUid}`);
 }
 
+function extractTaskUid(payload) {
+  if (!payload) return null;
+  if (typeof payload === "number") return payload;
+  if (typeof payload === "string" && /^\d+$/.test(payload)) return Number(payload);
+  if (payload.taskUid != null) return Number(payload.taskUid);
+  if (payload.uid != null) return Number(payload.uid);
+  if (payload.task && payload.task.taskUid != null) return Number(payload.task.taskUid);
+  if (payload.task && payload.task.uid != null) return Number(payload.task.uid);
+  if (payload.updateId != null) return Number(payload.updateId);
+  return null;
+}
+
+async function findLatestTaskUid(taskType) {
+  const data = await meiliRequest(
+    `/tasks?types=${encodeURIComponent(taskType)}&statuses=enqueued,processing,succeeded&limit=1`,
+    { method: "GET" }
+  );
+  const results = Array.isArray(data) ? data : Array.isArray(data.results) ? data.results : [];
+  if (!results.length) return null;
+  return extractTaskUid(results[0]);
+}
+
 async function uploadToS3(filePath, folder) {
   if (!config.s3Enabled || !s3Client) return null;
   const fileName = path.basename(filePath);
@@ -195,7 +217,13 @@ app.get("/ops/status", async () => {
 app.post("/ops/backup/dump", async () => {
   await ensureDir(config.dumpDir);
   const task = await meiliRequest("/dumps", { method: "POST", body: JSON.stringify({}) });
-  const taskUid = task.taskUid || task.uid;
+  let taskUid = extractTaskUid(task);
+  if (!taskUid) {
+    taskUid = await findLatestTaskUid("dumpCreation");
+  }
+  if (!taskUid) {
+    throw new Error("Could not determine dump task UID from Meilisearch response.");
+  }
   const done = await waitTask(taskUid);
   const dumpFile = await newestFile(config.dumpDir, /\.dump$/i);
   const s3Key = dumpFile ? await uploadToS3(dumpFile, "dumps") : null;
@@ -214,7 +242,13 @@ app.post("/ops/backup/dump", async () => {
 app.post("/ops/backup/snapshot", async () => {
   await ensureDir(config.snapshotDir);
   const task = await meiliRequest("/snapshots", { method: "POST", body: JSON.stringify({}) });
-  const taskUid = task.taskUid || task.uid;
+  let taskUid = extractTaskUid(task);
+  if (!taskUid) {
+    taskUid = await findLatestTaskUid("snapshotCreation");
+  }
+  if (!taskUid) {
+    throw new Error("Could not determine snapshot task UID from Meilisearch response.");
+  }
   const done = await waitTask(taskUid);
   const snapshotFile = await newestFile(config.snapshotDir, /snapshot|\.snapshot$/i);
   const s3Key = snapshotFile ? await uploadToS3(snapshotFile, "snapshots") : null;
