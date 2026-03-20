@@ -196,6 +196,228 @@ app.get("/health", async () => {
   return { status: "ok", meili: health.status || "available" };
 });
 
+app.get("/", async (_request, reply) => {
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Meili Safeops</title>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --card: #121a31;
+      --soft: #1a2547;
+      --text: #eaf0ff;
+      --muted: #9fb0dc;
+      --ok: #26d07c;
+      --warn: #ffca55;
+      --err: #ff6b6b;
+      --accent: #5aa9ff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+      background: radial-gradient(circle at top right, #1d2d5a, var(--bg) 40%);
+      color: var(--text);
+    }
+    .wrap {
+      max-width: 980px;
+      margin: 28px auto;
+      padding: 0 16px;
+      display: grid;
+      gap: 16px;
+    }
+    .card {
+      background: rgba(18, 26, 49, 0.95);
+      border: 1px solid #2a3868;
+      border-radius: 14px;
+      padding: 16px;
+    }
+    h1, h2 { margin: 0 0 10px; }
+    h1 { font-size: 24px; }
+    h2 { font-size: 16px; color: var(--muted); }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; }
+    .kpi {
+      flex: 1;
+      min-width: 180px;
+      background: var(--soft);
+      border-radius: 10px;
+      padding: 10px;
+    }
+    .kpi .label { color: var(--muted); font-size: 12px; }
+    .kpi .value { font-weight: 700; margin-top: 3px; word-break: break-all; }
+    button {
+      border: 0;
+      border-radius: 9px;
+      padding: 10px 14px;
+      color: #051025;
+      background: var(--accent);
+      font-weight: 700;
+      cursor: pointer;
+    }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    input, select {
+      width: 100%;
+      padding: 10px;
+      border-radius: 8px;
+      border: 1px solid #314378;
+      background: #0d1430;
+      color: var(--text);
+      margin-bottom: 10px;
+    }
+    pre {
+      margin: 0;
+      background: #0a1128;
+      border: 1px solid #2b3e72;
+      border-radius: 10px;
+      padding: 12px;
+      max-height: 360px;
+      overflow: auto;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .badge { font-weight: 700; }
+    .ok { color: var(--ok); }
+    .warn { color: var(--warn); }
+    .err { color: var(--err); }
+    .muted { color: var(--muted); font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>Meili Safeops Runner</h1>
+      <h2>Backup, snapshot and restore operations panel</h2>
+      <div class="row">
+        <div class="kpi"><div class="label">Meili Host</div><div class="value" id="meiliHost">-</div></div>
+        <div class="kpi"><div class="label">Current Version</div><div class="value" id="currentVersion">-</div></div>
+        <div class="kpi"><div class="label">Compatibility</div><div class="value" id="compatibility">-</div></div>
+      </div>
+      <div class="row" style="margin-top:10px;">
+        <button id="refreshBtn">Refresh Status</button>
+        <button id="dumpBtn">Create Dump Backup</button>
+        <button id="snapshotBtn">Create Snapshot Backup</button>
+      </div>
+      <div class="muted" style="margin-top:8px;">Endpoints: GET /ops/status, POST /ops/backup/dump, POST /ops/backup/snapshot, POST /ops/restore</div>
+    </div>
+
+    <div class="card">
+      <h1 style="font-size:18px;">Restore Request</h1>
+      <div class="row">
+        <div style="flex:1; min-width:220px;">
+          <label>Type</label>
+          <select id="restoreType">
+            <option value="dump">dump</option>
+            <option value="snapshot">snapshot</option>
+          </select>
+        </div>
+        <div style="flex:2; min-width:300px;">
+          <label>Local Path (optional)</label>
+          <input id="restorePath" placeholder="/meili_data/dumps/my.dump" />
+        </div>
+      </div>
+      <div class="row">
+        <div style="flex:1; min-width:300px;">
+          <label>S3 Key (optional)</label>
+          <input id="s3Key" placeholder="meili-backups/dumps/..." />
+        </div>
+      </div>
+      <button id="restoreBtn">Create Restore Job</button>
+    </div>
+
+    <div class="card">
+      <h1 style="font-size:18px;">Response</h1>
+      <pre id="output">Ready.</pre>
+    </div>
+  </div>
+
+  <script>
+    const output = document.getElementById("output");
+    const meiliHost = document.getElementById("meiliHost");
+    const currentVersion = document.getElementById("currentVersion");
+    const compatibility = document.getElementById("compatibility");
+
+    function setOutput(data) {
+      output.textContent = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+    }
+
+    async function api(path, options = {}) {
+      const res = await fetch(path, options);
+      const text = await res.text();
+      let data = {};
+      try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+      if (!res.ok) throw data;
+      return data;
+    }
+
+    async function refreshStatus() {
+      try {
+        const data = await api("/ops/status");
+        meiliHost.textContent = "${config.meiliHost}";
+        currentVersion.textContent = data.currentVersion || "-";
+        const c = data.compatibility || {};
+        const cls = c.ok ? "ok" : "warn";
+        compatibility.innerHTML = '<span class="badge ' + cls + '">' + (c.ok ? "compatible" : "check_required") + "</span> (" + (c.reason || "-") + ")";
+        setOutput(data);
+      } catch (e) {
+        compatibility.innerHTML = '<span class="badge err">error</span>';
+        setOutput(e);
+      }
+    }
+
+    async function runAction(button, fn) {
+      button.disabled = true;
+      try { await fn(); } finally { button.disabled = false; }
+    }
+
+    document.getElementById("refreshBtn").addEventListener("click", () =>
+      runAction(document.getElementById("refreshBtn"), refreshStatus)
+    );
+
+    document.getElementById("dumpBtn").addEventListener("click", () =>
+      runAction(document.getElementById("dumpBtn"), async () => {
+        const data = await api("/ops/backup/dump", { method: "POST" });
+        setOutput(data);
+        await refreshStatus();
+      })
+    );
+
+    document.getElementById("snapshotBtn").addEventListener("click", () =>
+      runAction(document.getElementById("snapshotBtn"), async () => {
+        const data = await api("/ops/backup/snapshot", { method: "POST" });
+        setOutput(data);
+        await refreshStatus();
+      })
+    );
+
+    document.getElementById("restoreBtn").addEventListener("click", () =>
+      runAction(document.getElementById("restoreBtn"), async () => {
+        const payload = {
+          type: document.getElementById("restoreType").value,
+          localPath: document.getElementById("restorePath").value.trim(),
+          s3Key: document.getElementById("s3Key").value.trim()
+        };
+        if (!payload.localPath) delete payload.localPath;
+        if (!payload.s3Key) delete payload.s3Key;
+        const data = await api("/ops/restore", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        setOutput(data);
+      })
+    );
+
+    refreshStatus();
+  </script>
+</body>
+</html>`;
+
+  reply.type("text/html; charset=utf-8").send(html);
+});
+
 app.get("/ops/status", async () => {
   const version = await meiliRequest("/version", { method: "GET" });
   const compatibility = checkUpgradeCompatibility(version.pkgVersion, config.targetMeiliVersion);
