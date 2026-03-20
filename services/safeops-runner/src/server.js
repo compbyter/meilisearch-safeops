@@ -23,11 +23,18 @@ const config = {
   s3Region: process.env.S3_REGION || "",
   s3Prefix: process.env.S3_PREFIX || "meili-backups",
   awsAccessKeyId: process.env.AWS_ACCESS_KEY_ID || "",
-  awsSecretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || ""
+  awsSecretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || "",
+  adminUser: process.env.SAFEOPS_ADMIN_USER || "admin",
+  adminPassword: process.env.SAFEOPS_ADMIN_PASSWORD || ""
 };
 
 if (/latest/i.test(config.meiliImageTag)) {
   console.error("MEILI_IMAGE_TAG cannot be latest.");
+  process.exit(1);
+}
+
+if (!config.adminPassword) {
+  console.error("SAFEOPS_ADMIN_PASSWORD is required.");
   process.exit(1);
 }
 
@@ -72,6 +79,42 @@ function checkUpgradeCompatibility(current, target) {
   return { ok: true, reason: "compatible" };
 }
 
+function decodeBasicAuth(headerValue) {
+  if (!headerValue || !headerValue.startsWith("Basic ")) return null;
+  const encoded = headerValue.slice(6).trim();
+  let decoded;
+  try {
+    decoded = Buffer.from(encoded, "base64").toString("utf8");
+  } catch {
+    return null;
+  }
+  const idx = decoded.indexOf(":");
+  if (idx === -1) return null;
+  return {
+    username: decoded.slice(0, idx),
+    password: decoded.slice(idx + 1)
+  };
+}
+
+function unauthorized(reply) {
+  return reply
+    .code(401)
+    .header("WWW-Authenticate", 'Basic realm="Safeops Admin"')
+    .send({ error: "unauthorized", message: "Invalid admin credentials." });
+}
+
+app.addHook("onRequest", async (request, reply) => {
+  if (request.raw.url?.startsWith("/health")) return;
+  if (request.method === "OPTIONS") return;
+
+  const auth = decodeBasicAuth(request.headers.authorization);
+  if (!auth) return unauthorized(reply);
+
+  if (auth.username !== config.adminUser || auth.password !== config.adminPassword) {
+    return unauthorized(reply);
+  }
+});
+
 async function meiliRequest(pathname, options = {}) {
   const response = await fetch(`${config.meiliHost}${pathname}`, {
     ...options,
@@ -95,29 +138,42 @@ async function ensureDir(dir) {
   await fs.mkdir(dir, { recursive: true });
 }
 
-async function listFiles(dir) {
+function getFileCollection(type) {
+  if (type === "dump") {
+    return { type: "dump", dir: config.dumpDir, pattern: /\.dump$/i };
+  }
+  if (type === "snapshot") {
+    return { type: "snapshot", dir: config.snapshotDir, pattern: /snapshot|\.snapshot$/i };
+  }
+  return null;
+}
+
+async function listFilesDetailed(dir, pattern = null) {
   try {
-    const files = await fs.readdir(dir);
-    return files.map((name) => path.join(dir, name));
+    const names = await fs.readdir(dir);
+    const rows = [];
+    for (const name of names) {
+      const filePath = path.join(dir, name);
+      const stat = await fs.stat(filePath);
+      if (!stat.isFile()) continue;
+      if (pattern && !pattern.test(name)) continue;
+      rows.push({
+        name,
+        path: filePath,
+        sizeBytes: stat.size,
+        updatedAt: stat.mtime.toISOString()
+      });
+    }
+    rows.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+    return rows;
   } catch {
     return [];
   }
 }
 
 async function newestFile(dir, pattern = null) {
-  const files = await listFiles(dir);
-  const filtered = pattern ? files.filter((file) => pattern.test(path.basename(file))) : files;
-  if (!filtered.length) return null;
-
-  const withStats = await Promise.all(
-    filtered.map(async (file) => ({
-      file,
-      stat: await fs.stat(file)
-    }))
-  );
-
-  withStats.sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
-  return withStats[0].file;
+  const rows = await listFilesDetailed(dir, pattern);
+  return rows.length ? rows[0].path : null;
 }
 
 async function waitTask(taskUid) {
@@ -214,6 +270,7 @@ app.get("/", async (_request, reply) => {
       --warn: #ffca55;
       --err: #ff6b6b;
       --accent: #5aa9ff;
+      --line: #2a3868;
     }
     * { box-sizing: border-box; }
     body {
@@ -231,13 +288,14 @@ app.get("/", async (_request, reply) => {
     }
     .card {
       background: rgba(18, 26, 49, 0.95);
-      border: 1px solid #2a3868;
+      border: 1px solid var(--line);
       border-radius: 14px;
       padding: 16px;
     }
-    h1, h2 { margin: 0 0 10px; }
+    h1, h2, h3 { margin: 0 0 10px; }
     h1 { font-size: 24px; }
     h2 { font-size: 16px; color: var(--muted); }
+    h3 { font-size: 14px; color: var(--muted); }
     .row { display: flex; gap: 10px; flex-wrap: wrap; }
     .kpi {
       flex: 1;
@@ -248,7 +306,7 @@ app.get("/", async (_request, reply) => {
     }
     .kpi .label { color: var(--muted); font-size: 12px; }
     .kpi .value { font-weight: 700; margin-top: 3px; word-break: break-all; }
-    button {
+    button, a.dl {
       border: 0;
       border-radius: 9px;
       padding: 10px 14px;
@@ -256,6 +314,8 @@ app.get("/", async (_request, reply) => {
       background: var(--accent);
       font-weight: 700;
       cursor: pointer;
+      text-decoration: none;
+      display: inline-block;
     }
     button:disabled { opacity: 0.6; cursor: not-allowed; }
     input, select {
@@ -283,6 +343,19 @@ app.get("/", async (_request, reply) => {
     .warn { color: var(--warn); }
     .err { color: var(--err); }
     .muted { color: var(--muted); font-size: 12px; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+    th, td {
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      padding: 8px 6px;
+      vertical-align: top;
+      word-break: break-all;
+    }
+    th { color: var(--muted); font-weight: 600; }
   </style>
 </head>
 <body>
@@ -300,7 +373,29 @@ app.get("/", async (_request, reply) => {
         <button id="dumpBtn">Create Dump Backup</button>
         <button id="snapshotBtn">Create Snapshot Backup</button>
       </div>
-      <div class="muted" style="margin-top:8px;">Endpoints: GET /ops/status, POST /ops/backup/dump, POST /ops/backup/snapshot, POST /ops/restore</div>
+      <div class="muted" style="margin-top:8px;">Auth user: ${config.adminUser}. API calls require Basic Auth.</div>
+    </div>
+
+    <div class="card">
+      <h1 style="font-size:18px;">Backups</h1>
+      <div class="row">
+        <div style="flex:1; min-width:320px;">
+          <h3>Dumps</h3>
+          <table>
+            <thead><tr><th>File</th><th>Updated</th><th>Size</th><th>Action</th></tr></thead>
+            <tbody id="dumpRows"><tr><td colspan="4">Loading...</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="row" style="margin-top:12px;">
+        <div style="flex:1; min-width:320px;">
+          <h3>Snapshots</h3>
+          <table>
+            <thead><tr><th>File</th><th>Updated</th><th>Size</th><th>Action</th></tr></thead>
+            <tbody id="snapshotRows"><tr><td colspan="4">Loading...</td></tr></tbody>
+          </table>
+        </div>
+      </div>
     </div>
 
     <div class="card">
@@ -338,9 +433,19 @@ app.get("/", async (_request, reply) => {
     const meiliHost = document.getElementById("meiliHost");
     const currentVersion = document.getElementById("currentVersion");
     const compatibility = document.getElementById("compatibility");
+    const dumpRows = document.getElementById("dumpRows");
+    const snapshotRows = document.getElementById("snapshotRows");
 
     function setOutput(data) {
       output.textContent = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+    }
+
+    function formatSize(bytes) {
+      const n = Number(bytes || 0);
+      if (n < 1024) return n + " B";
+      if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+      if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + " MB";
+      return (n / (1024 * 1024 * 1024)).toFixed(1) + " GB";
     }
 
     async function api(path, options = {}) {
@@ -350,6 +455,29 @@ app.get("/", async (_request, reply) => {
       try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
       if (!res.ok) throw data;
       return data;
+    }
+
+    function renderFiles(target, type, files) {
+      if (!files.length) {
+        target.innerHTML = '<tr><td colspan="4">No files found.</td></tr>';
+        return;
+      }
+      target.innerHTML = files.map((file) => {
+        const href = "/ops/files/" + type + "/" + encodeURIComponent(file.name) + "/download";
+        return "<tr>" +
+          "<td>" + file.name + "</td>" +
+          "<td>" + (file.updatedAt || "-") + "</td>" +
+          "<td>" + formatSize(file.sizeBytes) + "</td>" +
+          "<td><a class='dl' href='" + href + "'>Download</a></td>" +
+          "</tr>";
+      }).join("");
+    }
+
+    async function refreshFiles() {
+      const dumps = await api("/ops/files?type=dump");
+      const snapshots = await api("/ops/files?type=snapshot");
+      renderFiles(dumpRows, "dump", dumps.files || []);
+      renderFiles(snapshotRows, "snapshot", snapshots.files || []);
     }
 
     async function refreshStatus() {
@@ -373,7 +501,10 @@ app.get("/", async (_request, reply) => {
     }
 
     document.getElementById("refreshBtn").addEventListener("click", () =>
-      runAction(document.getElementById("refreshBtn"), refreshStatus)
+      runAction(document.getElementById("refreshBtn"), async () => {
+        await refreshStatus();
+        await refreshFiles();
+      })
     );
 
     document.getElementById("dumpBtn").addEventListener("click", () =>
@@ -381,6 +512,7 @@ app.get("/", async (_request, reply) => {
         const data = await api("/ops/backup/dump", { method: "POST" });
         setOutput(data);
         await refreshStatus();
+        await refreshFiles();
       })
     );
 
@@ -389,6 +521,7 @@ app.get("/", async (_request, reply) => {
         const data = await api("/ops/backup/snapshot", { method: "POST" });
         setOutput(data);
         await refreshStatus();
+        await refreshFiles();
       })
     );
 
@@ -410,12 +543,56 @@ app.get("/", async (_request, reply) => {
       })
     );
 
-    refreshStatus();
+    (async () => {
+      await refreshStatus();
+      await refreshFiles();
+    })();
   </script>
 </body>
 </html>`;
 
   reply.type("text/html; charset=utf-8").send(html);
+});
+
+app.get("/ops/files", async (request, reply) => {
+  const type = String(request.query?.type || "dump").toLowerCase();
+  const collection = getFileCollection(type);
+  if (!collection) {
+    return reply.code(400).send({ error: "invalid_type", message: "type must be dump or snapshot" });
+  }
+
+  const files = await listFilesDetailed(collection.dir, collection.pattern);
+  return { status: "ok", type: collection.type, files };
+});
+
+app.get("/ops/files/:type/:name/download", async (request, reply) => {
+  const type = String(request.params?.type || "").toLowerCase();
+  const collection = getFileCollection(type);
+  if (!collection) {
+    return reply.code(400).send({ error: "invalid_type", message: "type must be dump or snapshot" });
+  }
+
+  const requestedName = decodeURIComponent(String(request.params?.name || ""));
+  if (!requestedName || path.basename(requestedName) !== requestedName) {
+    return reply.code(400).send({ error: "invalid_file_name" });
+  }
+
+  if (collection.pattern && !collection.pattern.test(requestedName)) {
+    return reply.code(400).send({ error: "invalid_file_type" });
+  }
+
+  const filePath = path.join(collection.dir, requestedName);
+  const exists = await fs
+    .access(filePath)
+    .then(() => true)
+    .catch(() => false);
+  if (!exists) {
+    return reply.code(404).send({ error: "file_not_found", file: requestedName });
+  }
+
+  reply.header("Content-Type", "application/octet-stream");
+  reply.header("Content-Disposition", `attachment; filename="${requestedName}"`);
+  return reply.send(createReadStream(filePath));
 });
 
 app.get("/ops/status", async () => {

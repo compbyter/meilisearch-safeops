@@ -10,7 +10,10 @@ Operational template for Meilisearch stability, backup workflow, and upgrade gua
 ## Public API (`safeops-runner`)
 
 - `GET /health`
+- `GET /` (web UI)
 - `GET /ops/status`
+- `GET /ops/files?type=dump|snapshot`
+- `GET /ops/files/:type/:name/download`
 - `POST /ops/backup/dump`
 - `POST /ops/backup/snapshot`
 - `POST /ops/restore`
@@ -19,8 +22,10 @@ Operational template for Meilisearch stability, backup workflow, and upgrade gua
 
 - Prevents `latest` image drift.
 - Adds backup task orchestration.
+- Lists and downloads backup files from UI/API.
 - Supports optional S3 upload.
 - Adds pre-upgrade compatibility checks.
+- Protects UI and API with Basic Auth (`SAFEOPS_ADMIN_USER` / `SAFEOPS_ADMIN_PASSWORD`).
 
 ## Limits
 

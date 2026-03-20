@@ -11,6 +11,8 @@ Attach a volume to both services at `/meili_data`.
 
 - `MEILI_HOST`
 - `MEILI_API_KEY`
+- `SAFEOPS_ADMIN_USER`
+- `SAFEOPS_ADMIN_PASSWORD`
 - `MEILI_IMAGE_TAG` (must not be `latest`)
 
 Recommended:
@@ -31,9 +33,10 @@ Set `S3_ENABLED=true` and provide AWS settings from `ENV.example`.
 ## 5) Smoke tests
 
 ```bash
-curl "$SAFEOPS_URL/ops/status"
-curl -X POST "$SAFEOPS_URL/ops/backup/dump"
-curl -X POST "$SAFEOPS_URL/ops/backup/snapshot"
+curl -u admin:$SAFEOPS_ADMIN_PASSWORD "$SAFEOPS_URL/ops/status"
+curl -u admin:$SAFEOPS_ADMIN_PASSWORD "$SAFEOPS_URL/ops/files?type=dump"
+curl -u admin:$SAFEOPS_ADMIN_PASSWORD -X POST "$SAFEOPS_URL/ops/backup/dump"
+curl -u admin:$SAFEOPS_ADMIN_PASSWORD -X POST "$SAFEOPS_URL/ops/backup/snapshot"
 ```
 
 ## 6) Restore workflow
