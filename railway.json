@@ -1,0 +1,23 @@
+{
+  "name": "Meili SafeOps",
+  "description": "Meilisearch backup and upgrade-safe operations template.",
+  "services": [
+    {
+      "name": "meilisearch",
+      "rootDirectory": "services/meilisearch",
+      "healthcheckPath": "/health",
+      "volumeMountPath": "/meili_data"
+    },
+    {
+      "name": "safeops-runner",
+      "rootDirectory": "services/safeops-runner",
+      "healthcheckPath": "/health",
+      "volumeMountPath": "/meili_data"
+    }
+  ],
+  "requiredVariables": [
+    "MEILI_HOST",
+    "MEILI_API_KEY",
+    "MEILI_IMAGE_TAG"
+  ]
+}

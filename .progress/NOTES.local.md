@@ -1,0 +1,3 @@
+- Keep meili image pinned.
+- Share volume with safeops-runner.
+- Use S3 only when credentials are valid.
